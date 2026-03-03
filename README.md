@@ -7,12 +7,14 @@ Pierderea rămasă de recuperat în anii viitori.
 Impozitul pe profit (16%) final, după aplicarea deducerilor.
 
 ✨ Facilități Cheie:
+
 Multi-Firmă: Salvează date separat pentru fiecare entitate în fișiere JSON.
 Bază de Date Sigură: Datele sunt stocate în folderul AppData al utilizatorului.
 Backup & Restore: Funcție de arhivare (ZIP) și restaurare a întregii baze de date.
 Auto-Update: Verifică automat pe GitHub dacă a apărut o versiune mai nouă și se poate auto-actualiza.
 
 🛠 Instrucțiuni de Utilizare
+
 1. Gestionarea Firmelor
 Înainte de a introduce cifre, trebuie să alegi o firmă:
 Apasă butonul 🏢 Firme din bara de sus.
@@ -30,6 +32,7 @@ După ce ai introdus datele pentru toți anii relevanți, apasă butonul 📊 Ca
 Foarte Important: Apasă 💾 Salveaza date pentru a scrie informațiile în baza de date locală, astfel încât să le găsești și la următoarea deschidere a aplicației.
 
 💡 Note Tehnice pentru Utilizator
+
 Format numere: Folosește punctul (.) ca separator zecimal (ex: 1500.50), nu virgula.
 
 Actualizări: Dacă la pornire aplicația te anunță că există o versiune nouă, acceptă descărcarea. Programul se va închide, va înlocui vechiul fișier .exe cu cel nou și va trebui doar să îl redeschizi.
