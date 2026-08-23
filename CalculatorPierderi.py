@@ -1,0 +1,471 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog, filedialog
+import threading
+import requests
+import os
+import sys
+import json
+import zipfile
+
+# ──────────────────────────────────────────────
+VERSION     = "1.1.1"
+GITHUB_USER = "CitadelisDev"
+GITHUB_REPO = "Calculator-Pierderi"
+EXE_NAME    = "CalculatorPierderi.exe"
+
+# Date salvate în AppData\Roaming\CalculatorPierderi\date_firme
+DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
+                        "CalculatorPierderi", "date_firme")
+os.makedirs(DATA_DIR, exist_ok=True)
+# ──────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════
+#  GESTIONARE FIRME  (JSON per firmă)
+# ══════════════════════════════════════════════
+
+def _fisier_firma(nume_firma):
+    safe = "".join(c if c.isalnum() or c in " _-" else "_" for c in nume_firma).strip()
+    return os.path.join(DATA_DIR, f"{safe}.json")
+
+
+def lista_firme():
+    firme = []
+    for f in os.listdir(DATA_DIR):
+        if f.endswith(".json"):
+            try:
+                with open(os.path.join(DATA_DIR, f), encoding="utf-8") as fp:
+                    data = json.load(fp)
+                firme.append(data.get("nume_firma", f[:-5]))
+            except Exception:
+                pass
+    return sorted(firme)
+
+
+def salveaza_firma(nume_firma, date):
+    try:
+        with open(_fisier_firma(nume_firma), "w", encoding="utf-8") as f:
+            json.dump({"nume_firma": nume_firma, "date": date}, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        messagebox.showerror("Eroare salvare", f"Nu s-au putut salva datele:\n{e}")
+        return False
+
+
+def incarca_firma(nume_firma):
+    path = _fisier_firma(nume_firma)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("date", [])
+    except Exception as e:
+        messagebox.showerror("Eroare incarcare", f"Nu s-au putut incarca datele:\n{e}")
+        return []
+
+
+def sterge_firma(nume_firma):
+    path = _fisier_firma(nume_firma)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+# ══════════════════════════════════════════════
+#  BACKUP & RESTAURARE
+# ══════════════════════════════════════════════
+
+def backup_baza_date():
+    dest = filedialog.asksaveasfilename(
+        title="Salvează backup",
+        defaultextension=".zip",
+        filetypes=[("Arhiva ZIP", "*.zip")],
+        initialfile="backup_CalculatorPierderi.zip"
+    )
+    if not dest:
+        return
+    try:
+        with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname in os.listdir(DATA_DIR):
+                if fname.endswith(".json"):
+                    zf.write(os.path.join(DATA_DIR, fname), arcname=fname)
+        messagebox.showinfo("Backup reusit",
+            f"Baza de date a fost salvata cu succes in:\n{dest}")
+    except Exception as e:
+        messagebox.showerror("Eroare backup", f"Backup esuat:\n{e}")
+
+
+def restaurare_baza_date():
+    src = filedialog.askopenfilename(
+        title="Selecteaza fisierul de backup",
+        filetypes=[("Arhiva ZIP", "*.zip")]
+    )
+    if not src:
+        return
+    confirmare = messagebox.askyesno(
+        "Confirmare restaurare",
+        "Restaurarea va suprascrie datele existente.\n"
+        "Esti sigur ca vrei sa continui?"
+    )
+    if not confirmare:
+        return
+    try:
+        # Curățăm folderul curent
+        for fname in os.listdir(DATA_DIR):
+            if fname.endswith(".json"):
+                os.remove(os.path.join(DATA_DIR, fname))
+        # Extragem backup-ul (cu protectie impotriva path traversal)
+        with zipfile.ZipFile(src, "r") as zf:
+            for member in zf.namelist():
+                target = os.path.normpath(os.path.join(DATA_DIR, member))
+                if not target.startswith(os.path.normpath(DATA_DIR)):
+                    raise ValueError(f"Backup contine cai nesigure: {member}")
+                zf.extract(member, DATA_DIR)
+        # Resetăm starea aplicației
+        firma_curenta.set("")
+        global date_fiscale
+        date_fiscale = []
+        _refresh_tabel_intrari()
+        rezultate.delete(*rezultate.get_children())
+        lbl_firma_activa.config(text="Firma activa: —")
+        messagebox.showinfo("Restaurare reusita",
+            "Baza de date a fost restaurata cu succes!\n"
+            "Selecteaza o firma din meniu pentru a continua.")
+    except Exception as e:
+        messagebox.showerror("Eroare restaurare", f"Restaurare esuata:\n{e}")
+
+
+# ══════════════════════════════════════════════
+#  AUTO-UPDATE
+# ══════════════════════════════════════════════
+
+def verifica_actualizare():
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/releases/latest"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        versiune_noua = data["tag_name"].lstrip("v")
+        if _versiune_mai_mare(versiune_noua, VERSION):
+            asset_url = None
+            for asset in data.get("assets", []):
+                if asset["name"].lower() == EXE_NAME.lower():
+                    asset_url = asset["browser_download_url"]
+                    break
+            if asset_url:
+                root.after(0, lambda: intreaba_utilizator(versiune_noua, asset_url))
+            else:
+                root.after(0, lambda: messagebox.showwarning(
+                    "Actualizare",
+                    f"Versiunea {versiune_noua} e disponibila, dar fisierul\n"
+                    f"'{EXE_NAME}' nu a fost gasit in release."))
+    except Exception:
+        pass
+
+
+def _versiune_mai_mare(noua, curenta):
+    try:
+        return tuple(int(x) for x in noua.split(".")) > \
+               tuple(int(x) for x in curenta.split("."))
+    except ValueError:
+        return False
+
+
+def intreaba_utilizator(versiune_noua, asset_url):
+    raspuns = messagebox.askyesno(
+        "Actualizare disponibila",
+        f"O versiune noua ({versiune_noua}) este disponibila!\n"
+        f"Versiunea ta curenta: {VERSION}\n\n"
+        f"Doresti sa descarci actualizarea acum?")
+    if raspuns:
+        threading.Thread(target=descarca_actualizare, args=(asset_url,), daemon=True).start()
+
+
+def descarca_actualizare(asset_url):
+    try:
+        root.after(0, lambda: messagebox.showinfo("Actualizare", "Descarcare in curs...\nTe rugam sa astepti."))
+        response = requests.get(asset_url, timeout=60, stream=True)
+        response.raise_for_status()
+        exe_path = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(EXE_NAME)
+        exe_path = os.path.abspath(exe_path)
+        tmp_path = exe_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        old_path = exe_path + ".old"
+        if os.path.exists(exe_path):
+            if os.path.exists(old_path):
+                os.remove(old_path)
+            os.rename(exe_path, old_path)
+        os.rename(tmp_path, exe_path)
+        root.after(0, lambda: _finalizeaza_actualizare(exe_path))
+    except requests.ConnectionError:
+        root.after(0, lambda: messagebox.showerror("Actualizare", "Descarcarea a esuat: conexiune pierduta."))
+    except requests.Timeout:
+        root.after(0, lambda: messagebox.showerror("Actualizare", "Descarcarea a expirat. Incearca din nou."))
+    except PermissionError:
+        root.after(0, lambda: messagebox.showerror("Actualizare",
+            "Nu s-a putut suprascrie fisierul.\nIncearca sa rulezi aplicatia ca Administrator."))
+    except Exception as e:
+        root.after(0, lambda: messagebox.showerror("Actualizare", f"Eroare la descarcare:\n{e}"))
+
+
+def _finalizeaza_actualizare(exe_path):
+    messagebox.showinfo("Actualizare completa",
+        f"Actualizarea a fost descarcata si instalata cu succes!\n\n"
+        f"Aplicatia se va inchide acum.\n"
+        f"Te rugam sa redeschizi manual fisierul:\n\n{exe_path}")
+    root.destroy()
+
+
+# ══════════════════════════════════════════════
+#  LOGICĂ APLICAȚIE
+# ══════════════════════════════════════════════
+
+date_fiscale = []
+firma_curenta = None  # initializat dupa tk.Tk()
+
+
+def calculeaza():
+    rezultate.delete(*rezultate.get_children())
+    pierdere_acumulata = 0
+    for d in date_fiscale:
+        an       = d["an"]
+        pierdere = d["pierdere"]
+        profit   = d["profit"]
+        limita              = profit * 0.7
+        pierdere_totala     = pierdere + pierdere_acumulata
+        pierdere_recuperata = min(pierdere_totala, limita)
+        pierdere_acumulata  = pierdere_totala - pierdere_recuperata
+        profit_adjusted     = profit - pierdere_recuperata
+        impozit             = profit_adjusted * 0.16
+        rezultate.insert("", "end", values=(
+            an, pierdere, profit,
+            round(limita, 2), round(pierdere_recuperata, 2),
+            round(pierdere_acumulata, 2), round(profit_adjusted, 2), round(impozit, 2)))
+    # Salveaza automat datele firmei curente
+    firma = firma_curenta.get().strip()
+    if firma:
+        salveaza_firma(firma, date_fiscale)
+
+
+def adauga_date():
+    if not firma_curenta.get():
+        messagebox.showwarning("Atentie", "Selecteaza sau creeaza o firma mai intai!")
+        return
+    try:
+        an       = int(entry_an.get())
+        pierdere = float(entry_pierdere.get())
+        profit   = float(entry_profit.get())
+        date_fiscale.append({"an": an, "pierdere": pierdere, "profit": profit})
+        entry_an.delete(0, tk.END)
+        entry_pierdere.delete(0, tk.END)
+        entry_profit.delete(0, tk.END)
+        _refresh_tabel_intrari()
+    except ValueError:
+        messagebox.showerror("Eroare", "Introduceti valori numerice valide!")
+
+
+def sterge_rand_selectat():
+    sel = tabel_intrari.selection()
+    if not sel:
+        messagebox.showwarning("Atentie", "Selecteaza un rand pentru a-l sterge!")
+        return
+    idx = tabel_intrari.index(sel[0])
+    date_fiscale.pop(idx)
+    _refresh_tabel_intrari()
+
+
+def _refresh_tabel_intrari():
+    tabel_intrari.delete(*tabel_intrari.get_children())
+    for d in date_fiscale:
+        tabel_intrari.insert("", "end", values=(d["an"], d["pierdere"], d["profit"]))
+
+
+def salveaza_date():
+    firma = firma_curenta.get().strip()
+    if not firma:
+        messagebox.showwarning("Atentie", "Selecteaza sau creeaza o firma mai intai!")
+        return
+    if salveaza_firma(firma, date_fiscale):
+        messagebox.showinfo("Salvat", f"Datele firmei '{firma}' au fost salvate cu succes!")
+
+
+def _incarca_date_firma(nume):
+    global date_fiscale
+    date_fiscale = incarca_firma(nume)
+    _refresh_tabel_intrari()
+    rezultate.delete(*rezultate.get_children())
+    lbl_firma_activa.config(text=f"Firma activa: {nume}")
+
+
+# ══════════════════════════════════════════════
+#  DIALOG SELECTARE / CREARE FIRMĂ
+# ══════════════════════════════════════════════
+
+def deschide_dialog_firme():
+    dialog = tk.Toplevel(root)
+    dialog.title("Gestionare Firme")
+    dialog.geometry("380x320")
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    tk.Label(dialog, text="Firme salvate:", font=("Arial", 10, "bold")).pack(pady=(10, 2))
+
+    frame_lista = tk.Frame(dialog)
+    frame_lista.pack(fill="both", expand=True, padx=10)
+
+    scrollbar = tk.Scrollbar(frame_lista)
+    scrollbar.pack(side="right", fill="y")
+
+    lb = tk.Listbox(frame_lista, yscrollcommand=scrollbar.set, font=("Arial", 10), height=8)
+    lb.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=lb.yview)
+
+    def _populeaza():
+        lb.delete(0, tk.END)
+        for f in lista_firme():
+            lb.insert(tk.END, f)
+
+    _populeaza()
+
+    def _selecteaza():
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showwarning("Atentie", "Selecteaza o firma din lista!", parent=dialog)
+            return
+        nume = lb.get(sel[0])
+        firma_curenta.set(nume)
+        _incarca_date_firma(nume)
+        dialog.destroy()
+
+    def _adauga_firma():
+        nume = simpledialog.askstring("Firma noua", "Introdu numele firmei:", parent=dialog)
+        if not nume or not nume.strip():
+            return
+        nume = nume.strip()
+        if nume in lista_firme():
+            messagebox.showwarning("Atentie", f"Firma '{nume}' exista deja!", parent=dialog)
+            return
+        salveaza_firma(nume, [])
+        _populeaza()
+
+    def _sterge_firma():
+        sel = lb.curselection()
+        if not sel:
+            messagebox.showwarning("Atentie", "Selecteaza o firma pentru a o sterge!", parent=dialog)
+            return
+        nume = lb.get(sel[0])
+        confirmare = messagebox.askyesno(
+            "Confirmare stergere",
+            f"Esti sigur ca vrei sa stergi firma '{nume}' si toate datele ei?",
+            parent=dialog)
+        if confirmare:
+            sterge_firma(nume)
+            if firma_curenta.get() == nume:
+                firma_curenta.set("")
+                global date_fiscale
+                date_fiscale = []
+                _refresh_tabel_intrari()
+                rezultate.delete(*rezultate.get_children())
+                lbl_firma_activa.config(text="Firma activa: —")
+            _populeaza()
+
+    frame_btn = tk.Frame(dialog)
+    frame_btn.pack(pady=8)
+
+    tk.Button(frame_btn, text="Selecteaza",  width=13, command=_selecteaza,   bg="#4CAF50", fg="white").grid(row=0, column=0, padx=4)
+    tk.Button(frame_btn, text="Firma noua",  width=13, command=_adauga_firma, bg="#2196F3", fg="white").grid(row=0, column=1, padx=4)
+    tk.Button(frame_btn, text="Sterge",      width=13, command=_sterge_firma,  bg="#f44336", fg="white").grid(row=0, column=2, padx=4)
+
+
+# ══════════════════════════════════════════════
+#  CONSTRUIRE GUI
+# ══════════════════════════════════════════════
+
+root = tk.Tk()
+firma_curenta = tk.StringVar()
+root.title(f"Calculator Recuperare Pierderi Fiscale  v{VERSION}")
+
+# ── TOOLBAR ──
+toolbar = tk.Frame(root, bg="#2c3e50", pady=4)
+toolbar.pack(fill="x", side="top")
+
+def _tb_btn(parent, text, cmd, bg="#3d5166"):
+    return tk.Button(parent, text=text, command=cmd,
+                     bg=bg, fg="white", relief="flat",
+                     font=("Arial", 9), padx=8, pady=3,
+                     activebackground="#4a6278", activeforeground="white",
+                     cursor="hand2")
+
+# Toolbar: doar Firme, Backup, Restaurare
+_tb_btn(toolbar, "🏢 Firme", deschide_dialog_firme).pack(side="left", padx=(6, 2), pady=2)
+
+# Separator vizual
+tk.Label(toolbar, text="|", bg="#2c3e50", fg="#556677").pack(side="left", padx=4)
+
+_tb_btn(toolbar, "📦 Backup BD", backup_baza_date, bg="#4a235a").pack(side="left", padx=2, pady=2)
+_tb_btn(toolbar, "📂 Restaurare BD", restaurare_baza_date, bg="#4a235a").pack(side="left", padx=2, pady=2)
+
+# Firma activa — dreapta
+lbl_firma_activa = tk.Label(toolbar, text="Firma activa: —",
+                             bg="#2c3e50", fg="#ecf0f1",
+                             font=("Arial", 9, "bold"))
+lbl_firma_activa.pack(side="right", padx=12)
+
+# ── Inputuri ──
+frame = tk.LabelFrame(root, text="Adauga date fiscale", padx=8, pady=6)
+frame.pack(padx=10, pady=(8, 4))
+
+tk.Label(frame, text="An:").grid(row=0, column=0, sticky="e", pady=2)
+entry_an = tk.Entry(frame, width=14)
+entry_an.grid(row=0, column=1, padx=6)
+
+tk.Label(frame, text="Pierdere fiscala:").grid(row=1, column=0, sticky="e", pady=2)
+entry_pierdere = tk.Entry(frame, width=14)
+entry_pierdere.grid(row=1, column=1, padx=6)
+
+tk.Label(frame, text="Profit impozabil:").grid(row=2, column=0, sticky="e", pady=2)
+entry_profit = tk.Entry(frame, width=14)
+entry_profit.grid(row=2, column=1, padx=6)
+
+frame_btn_input = tk.Frame(frame)
+frame_btn_input.grid(row=3, column=0, columnspan=2, pady=6)
+
+tk.Button(frame_btn_input, text="➕ Adauga date",   command=adauga_date,          bg="#4CAF50", fg="white", width=16).grid(row=0, column=0, padx=4)
+tk.Button(frame_btn_input, text="🗑 Sterge rand",   command=sterge_rand_selectat, bg="#f44336", fg="white", width=16).grid(row=0, column=1, padx=4)
+tk.Button(frame_btn_input, text="📊 Calculeaza",    command=calculeaza,           bg="#FF9800", fg="white", width=16).grid(row=0, column=2, padx=4)
+tk.Button(frame_btn_input, text="💾 Salveaza date", command=salveaza_date,        bg="#2196F3", fg="white", width=16).grid(row=0, column=3, padx=4)
+
+# ── Tabel date introduse ──
+frame_intrari = tk.LabelFrame(root, text="Date introduse", padx=6, pady=4)
+frame_intrari.pack(padx=10, pady=4, fill="x")
+
+col_intrari = ("An", "Pierdere fiscala", "Profit impozabil")
+tabel_intrari = ttk.Treeview(frame_intrari, columns=col_intrari, show="headings", height=5)
+for col in col_intrari:
+    tabel_intrari.heading(col, text=col)
+    tabel_intrari.column(col, width=150, anchor="center")
+tabel_intrari.pack(fill="x")
+
+# ── Tabel rezultate ──
+frame_rez = tk.LabelFrame(root, text="Rezultate calcul", padx=6, pady=4)
+frame_rez.pack(padx=10, pady=(4, 10), fill="both", expand=True)
+
+columns = ("An", "Pierdere fiscala", "Profit impozabil", "Limita 70%",
+           "Pierdere recuperata", "Pierdere ramasa", "Profit ajustat", "Impozit 16%")
+rezultate = ttk.Treeview(frame_rez, columns=columns, show="headings")
+for col in columns:
+    rezultate.heading(col, text=col)
+    rezultate.column(col, width=120, anchor="center")
+
+scroll_y = ttk.Scrollbar(frame_rez, orient="vertical", command=rezultate.yview)
+rezultate.configure(yscrollcommand=scroll_y.set)
+scroll_y.pack(side="right", fill="y")
+rezultate.pack(fill="both", expand=True)
+
+# ── Verificare actualizare in fundal ──
+root.after(2000, lambda: threading.Thread(target=verifica_actualizare, daemon=True).start())
+
+root.mainloop()
